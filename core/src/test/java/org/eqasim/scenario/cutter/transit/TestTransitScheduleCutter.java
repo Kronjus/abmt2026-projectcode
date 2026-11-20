@@ -98,26 +98,27 @@ public class TestTransitScheduleCutter {
 
 	@Test
 	public void incomingTiming() {
-		// inside = s4..s7. Original: s4 is served at 1000 + 300 = 1300
+		// inside = s4..s7. The cut keeps one outside stop on each side (s3 and s8) and
+		// every kept stop is served at its original absolute time (1000 + 100 * (i - 1)).
 		TransitRoute r = cut(4, 5, 6, 7);
 		double dep = r.getDepartures().values().iterator().next().getDepartureTime();
-		TransitRouteStop first = r.getStops().get(0);
-		Assert.assertEquals("s4", first.getStopFacility().getId().toString());
-		Assert.assertEquals(1300.0, dep + first.getDepartureOffset().seconds(), 1e-6);
 
-		// All remaining stops keep their original absolute time
+		Assert.assertEquals(6, r.getStops().size());
+		Assert.assertEquals("s3", r.getStops().get(0).getStopFacility().getId().toString());
+		Assert.assertEquals("s8", r.getStops().get(5).getStopFacility().getId().toString());
+
 		for (TransitRouteStop stop : r.getStops()) {
 			int i = Integer.parseInt(stop.getStopFacility().getId().toString().substring(1));
 			Assert.assertEquals(1000.0 + (i - 1) * 100.0, dep + stop.getDepartureOffset().seconds(), 1e-6);
 		}
-		Assert.assertEquals(4, r.getStops().size());
 	}
 
 	@Test
 	public void outgoingLastStop() {
-		// inside = s1..s3 -> expect s1,s2,s3 retained
+		// inside = s1..s3 -> s1..s3 plus the adjacent outside stop s4
 		TransitRoute r = cut(1, 2, 3);
-		Assert.assertEquals(3, r.getStops().size());
+		Assert.assertEquals(4, r.getStops().size());
 		Assert.assertEquals("s3", r.getStops().get(2).getStopFacility().getId().toString());
+		Assert.assertEquals("s4", r.getStops().get(3).getStopFacility().getId().toString());
 	}
 }
