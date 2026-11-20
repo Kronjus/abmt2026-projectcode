@@ -21,7 +21,6 @@ import org.matsim.pt.transitSchedule.api.MinimalTransferTimes.MinimalTransferTim
 import org.matsim.pt.transitSchedule.api.TransitLine;
 import org.matsim.pt.transitSchedule.api.TransitRoute;
 import org.matsim.pt.transitSchedule.api.TransitRouteStop;
-import org.matsim.pt.transitSchedule.api.TransitRouteStop.Builder;
 import org.matsim.pt.transitSchedule.api.TransitSchedule;
 import org.matsim.pt.transitSchedule.api.TransitScheduleFactory;
 import org.matsim.pt.transitSchedule.api.TransitStopFacility;
@@ -53,10 +52,9 @@ public class TransitScheduleCutter {
 			StopSequenceCrossingPoint firstCrossingPoint = crossingPoints.get(0);
 			StopSequenceCrossingPoint lastCrossingPoint = crossingPoints.get(crossingPoints.size() - 1);
 
-			int firstIndex = firstCrossingPoint.isOutgoing ? 0 : firstCrossingPoint.index + 1;
-			// For an outgoing crossing, index is the last inside stop, which must be kept
-			// (subList is end-exclusive).
-			int lastIndex = lastCrossingPoint.isOutgoing ? lastCrossingPoint.index + 1 : originalSequence.size();
+			// Include the adjacent outside stops; subList has an exclusive end index.
+			int firstIndex = firstCrossingPoint.isOutgoing ? 0 : firstCrossingPoint.index;
+			int lastIndex = lastCrossingPoint.isOutgoing ? lastCrossingPoint.index + 2 : originalSequence.size();
 
 			return originalSequence.subList(firstIndex, lastIndex);
 		}
@@ -101,48 +99,24 @@ public class TransitScheduleCutter {
 	}
 
 	private TransitRoute reduceRoute(TransitRoute originalRoute, TransitScheduleFactory factory) {
-		List<TransitRouteStop> originalStopSequence = originalRoute.getStops();
 		List<TransitRouteStop> reducedStopSequence = reduceStopSequence(originalRoute.getStops());
 
 		if (reducedStopSequence.size() < 2) {
 			return null;
 		} else {
-			double departureOffset = reducedStopSequence.get(0).getDepartureOffset().seconds()
-					- originalStopSequence.get(0).getDepartureOffset().seconds();
-
 			Id<Link> routeStartLinkId = reducedStopSequence.get(0).getStopFacility().getLinkId();
 			Id<Link> routeEndLinkId = reducedStopSequence.get(reducedStopSequence.size() - 1).getStopFacility()
 					.getLinkId();
 			NetworkRoute reducedNetworkRoute = reduceNetworkRoute(originalRoute.getRoute(), routeStartLinkId,
 					routeEndLinkId);
 
-			// The stop offsets are relative to the departure from the first stop of the
-			// route. Since the start of the route moves, rebase the offsets and move the
-			// departures by the same amount, such that every remaining stop is served at
-			// exactly the same absolute time as before.
-			List<TransitRouteStop> rebasedStopSequence = new LinkedList<>();
-
-			for (TransitRouteStop stop : reducedStopSequence) {
-				Builder builder = factory.createTransitRouteStopBuilder(stop.getStopFacility())
-						.awaitDepartureTime(stop.isAwaitDepartureTime());
-
-				if (stop.getArrivalOffset().isDefined()) {
-					builder.arrivalOffset(stop.getArrivalOffset().seconds() - departureOffset);
-				}
-
-				if (stop.getDepartureOffset().isDefined()) {
-					builder.departureOffset(stop.getDepartureOffset().seconds() - departureOffset);
-				}
-
-				rebasedStopSequence.add(builder.build());
-			}
-
 			TransitRoute reducedRoute = factory.createTransitRoute(originalRoute.getId(), reducedNetworkRoute,
-					rebasedStopSequence, originalRoute.getTransportMode());
+					reducedStopSequence, originalRoute.getTransportMode());
 
 			for (Departure originalDeparture : originalRoute.getDepartures().values()) {
+				// Stop offsets are retained, so departures must also retain their original time.
 				Departure reducedDeparture = factory.createDeparture(originalDeparture.getId(),
-						originalDeparture.getDepartureTime() + departureOffset);
+						originalDeparture.getDepartureTime());
 				reducedDeparture.setVehicleId(originalDeparture.getVehicleId());
 				reducedRoute.addDeparture(reducedDeparture);
 			}

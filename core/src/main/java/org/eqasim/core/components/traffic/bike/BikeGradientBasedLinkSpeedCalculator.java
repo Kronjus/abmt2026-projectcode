@@ -1,11 +1,8 @@
 package org.eqasim.core.components.traffic.bike;
 
 import org.eqasim.core.components.traffic.CrossingPenalty;
-import org.eqasim.core.components.traffic.EqasimLinkSpeedCalculator;
 import org.matsim.api.core.v01.Coord;
-import org.matsim.api.core.v01.TransportMode;
 import org.matsim.api.core.v01.network.Link;
-import org.matsim.core.mobsim.qsim.qnetsimengine.QVehicle;
 import org.matsim.vehicles.Vehicle;
 
 /**
@@ -14,9 +11,15 @@ import org.matsim.vehicles.Vehicle;
  */
 public class BikeGradientBasedLinkSpeedCalculator implements BikeSpeedCalculator {
     private final CrossingPenalty crossingPenalty;
+    private final BikeLinkData linkData;
 
     public BikeGradientBasedLinkSpeedCalculator(CrossingPenalty crossingPenalty) {
+        this(crossingPenalty, null);
+    }
+
+    public BikeGradientBasedLinkSpeedCalculator(CrossingPenalty crossingPenalty, BikeLinkData linkData) {
         this.crossingPenalty = crossingPenalty;
+        this.linkData = linkData;
     }
 
     /**
@@ -28,12 +31,21 @@ public class BikeGradientBasedLinkSpeedCalculator implements BikeSpeedCalculator
      */
     @Override
     public double getMaximumBikeVelocity(Vehicle vehicle, Link link, double time) {
+        return calculateVelocity(vehicle, link, time, false);
+    }
+
+    @Override
+    public double getRoutingBikeVelocity(Vehicle vehicle, Link link, double time) {
+        return calculateVelocity(vehicle, link, time, true);
+    }
+
+    private double calculateVelocity(Vehicle vehicle, Link link, double time, boolean routing) {
         double maximumVelocity = link.getFreespeed(time);
         if (!(vehicle == null)){
             maximumVelocity = Math.min(vehicle.getType().getMaximumVelocity(), maximumVelocity);
         }
 
-        double gradientBasedSpeed = getLinkSpeed(link);
+        double gradientBasedSpeed = linkData == null ? slopeSpeed(link) : linkData.slopeSpeed(link);
         double expectedVelocity = Math.min(maximumVelocity, gradientBasedSpeed);
 
         // if the bike speed is already slow, we do not need to add the crossing penalty
@@ -45,8 +57,12 @@ public class BikeGradientBasedLinkSpeedCalculator implements BikeSpeedCalculator
         // this need to be further investigated, but for now, I assume that the crossing penalty is only half as bad for bikes as for cars, because they can more easily maneuver around obstacles and other vehicles
         // TODO: add a proper delay for bikes
         double travelTime = link.getLength() / expectedVelocity;
-        if (!(vehicle == null)) {
-            travelTime += (crossingPenalty.calculateCrossingPenalty(link, time, vehicle.getId()) / 2.0); // the cutter raises an exception, so we need to check if the vehicle is null
+        if (routing) {
+            // Link-based routing cannot reproduce the path-dependent 30 m rule.
+            // Estimate each link independently, including when no vehicle is supplied.
+            travelTime += crossingPenalty.estimateCrossingPenalty(link, time) / 2.0;
+        } else if (vehicle != null) {
+            travelTime += crossingPenalty.calculateCrossingPenalty(link, time, vehicle.getId()) / 2.0;
         }
         double adjustedSpeed = link.getLength() / travelTime;
         return Math.max(1.0, Math.min(expectedVelocity, adjustedSpeed)); // Ensure speed is no less than 1 m/s and does not exceed expected velocity
@@ -58,7 +74,7 @@ public class BikeGradientBasedLinkSpeedCalculator implements BikeSpeedCalculator
      * @param link The link.
      * @return The gradient-based speed in m/s.
      */
-    private double getLinkSpeed(Link link) {
+    public static double slopeSpeed(Link link) {
         // Get gradient in percentage
         double gradient = percentageGradient(link);
 

@@ -20,6 +20,7 @@ import org.eqasim.core.simulation.mode_choice.ParameterDefinition;
 import org.eqasim.core.simulation.mode_choice.parameters.ModeParameters;
 import org.eqasim.switzerland.ch_cmdp.calibration.*;
 import org.eqasim.switzerland.ch_cmdp.config.SwissPTZonesConfigGroup;
+import org.eqasim.switzerland.ch_cmdp.mode_choice.constraints.AirportConstraint;
 import org.eqasim.switzerland.ch_cmdp.mode_choice.constraints.BorderConstraint;
 import org.eqasim.switzerland.ch_cmdp.mode_choice.constraints.LoopModesConstraint;
 import org.eqasim.switzerland.ch_cmdp.mode_choice.constraints.RemoteWalkConstraint;
@@ -74,6 +75,7 @@ public class SwissModeChoiceModule extends AbstractEqasimExtension {
 	static public final String LOOP_CONSTRAINT_NAME = "LoopModesConstraint";
 	static public final String REMOTE_WALK_CONSTRAINT_NAME = "RemoteWalkConstraint";
 	static public final String BORDER_CONSTRAINT_NAME = "BorderConstraint";
+	static public final String AIRPORT_CONSTRAINT_NAME = "AirportConstraint";
 
 	public SwissModeChoiceModule(CommandLine commandLine) {
 		this.commandLine = commandLine;
@@ -85,6 +87,7 @@ public class SwissModeChoiceModule extends AbstractEqasimExtension {
 		bindTripConstraintFactory(LOOP_CONSTRAINT_NAME).to(LoopModesConstraint.Factory.class);
 		bindTripConstraintFactory(REMOTE_WALK_CONSTRAINT_NAME).to(RemoteWalkConstraint.Factory.class);
 		bindTripConstraintFactory(BORDER_CONSTRAINT_NAME).to(BorderConstraint.Factory.class);
+		bindTripConstraintFactory(AIRPORT_CONSTRAINT_NAME).to(AirportConstraint.Factory.class);
 
 		bindCostModel(CAR_COST_MODEL_NAME).to(SwissCarCostModel.class);
 		bindCostModel(CAR_WEISS_COST_MODEL_NAME).to(SwissWeissCarCostModel.class);
@@ -112,21 +115,22 @@ public class SwissModeChoiceModule extends AbstractEqasimExtension {
 
 		AlphaCalibratorConfig calConfig = AlphaCalibratorConfig.getOrCreate(getConfig());
 		if (calConfig.isActivate()) {
-			String level = calConfig.getLevel().toLowerCase();
-			switch (level) {
-				case "global":
-					bind(FastCalibration.class).to(GlobalAlphaCalibrator.class).asEagerSingleton();
-					break;
-				case "canton":
-					bind(FastCalibration.class).to(AlphaCantonCalibrator.class).asEagerSingleton();
-					break;
-				case "cluster":
-					bind(FastCalibration.class).to(AlphaClusterCalibrator.class).asEagerSingleton();
-					break;
-				default:
-					throw new IllegalArgumentException("Unknown calibration level: " + level);
-			}
+			bind(FastCalibration.class).to(calibrationClass(calConfig.getLevel())).asEagerSingleton();
 		}
+	}
+
+	static Class<? extends FastCalibration> calibrationClass(String setting) {
+		String level = setting == null ? "" : setting.trim().toLowerCase(java.util.Locale.ROOT);
+		if (level.startsWith("keep_canton:")) {
+			KeepCantonAlphaCalibrator.parseCantons(setting);
+			return KeepCantonAlphaCalibrator.class;
+		}
+		return switch (level) {
+			case "global" -> GlobalAlphaCalibrator.class;
+			case "canton" -> AlphaCantonCalibrator.class;
+			case "cluster" -> AlphaClusterCalibrator.class;
+			default -> throw new IllegalArgumentException("Unknown calibration level: " + setting);
+		};
 	}
 
 	@Provides
@@ -181,7 +185,7 @@ public class SwissModeChoiceModule extends AbstractEqasimExtension {
 															  EqasimConfigGroup eqasimConfigGroup) {
 		AlphaCalibratorConfig calConfig = AlphaCalibratorConfig.getOrCreate(getConfig());
 
-		String filePath = calConfig.getFilePath();
+		String filePath = calConfig.getResolvedFilePath(getConfig());
 		if (filePath.isEmpty()) {
 			throw new IllegalArgumentException("You must provide the file path to the cantons mode share csv file when using canton level calibration.");
 		}
@@ -207,7 +211,7 @@ public class SwissModeChoiceModule extends AbstractEqasimExtension {
 																EqasimConfigGroup eqasimConfigGroup) {
 		AlphaCalibratorConfig calConfig = AlphaCalibratorConfig.getOrCreate(getConfig());
 
-		String filePath = calConfig.getFilePath();
+		String filePath = calConfig.getResolvedFilePath(getConfig());
 		if (filePath.isEmpty()) {
 			throw new IllegalArgumentException("You must provide the file path to the cantons mode share csv file when using canton level calibration.");
 		}
@@ -261,8 +265,9 @@ public class SwissModeChoiceModule extends AbstractEqasimExtension {
 		return new CmdpOptimizerHandler(calibrationConfig, outputDirectoryHierarchy, eqasimConfigGroup, parameters, optimizer);
 	}
 
+	// Loaded and merged before publication; predictors only read the shared registry.
 	@Provides
-	//@Singleton
+	@Singleton
 	public ZonalRegistry provideZonalRegistry(Config mainConfig) throws IOException, CsvValidationException {
 		SwissPTZonesConfigGroup ptZonesConfig = SwissPTZonesConfigGroup.getOrCreate(getConfig());
 
@@ -295,7 +300,9 @@ public class SwissModeChoiceModule extends AbstractEqasimExtension {
 		return zonalRegistry;
 	}
 
+	// The distance table is populated by the reader and only queried during replanning.
 	@Provides
+	@Singleton
 	public NetworkOfDistances provideNetworkOfDistances(Config mainConfig) throws IOException, CsvValidationException{
 		SwissPTZonesConfigGroup ptZonesConfig = SwissPTZonesConfigGroup.getOrCreate(getConfig());
 
@@ -314,7 +321,9 @@ public class SwissModeChoiceModule extends AbstractEqasimExtension {
 
 	}
 
+	// Pricing parameters are fixed after parsing; calculations keep per-trip state local.
 	@Provides
+	@Singleton
 	public SwissPtStageCostCalculator provideSwissPtStageCostCalculator(Config mainConfig) throws Exception{
 		SwissPTZonesConfigGroup ptZonesConfig = SwissPTZonesConfigGroup.getOrCreate(getConfig());
 

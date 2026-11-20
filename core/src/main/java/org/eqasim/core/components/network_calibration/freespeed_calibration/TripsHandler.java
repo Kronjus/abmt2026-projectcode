@@ -5,6 +5,8 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.eqasim.core.components.network_calibration.LinkCategorizer;
 import org.eqasim.core.components.network_calibration.NetworkCalibrationConfigGroup;
+import org.eqasim.core.components.routing.speedy.MemoryEfficientSpeedyALTFactory;
+import org.eqasim.core.scenario.cutter.network.RoadNetwork;
 import org.matsim.api.core.v01.Coord;
 import org.matsim.api.core.v01.network.Link;
 import org.matsim.api.core.v01.network.Network;
@@ -28,11 +30,12 @@ import java.util.concurrent.Future;
 public class TripsHandler {
     private static final Logger logger = LogManager.getLogger(TripsHandler.class);
 
+    private final Network sourceNetwork;
     private final Network network;
     private final LinkCategorizer categorizer;
     private final List<ObservedTripsTravelTimesCsvHandler.ObservedSpeedTrip> observedTrips;
-    private final TravelTime carTravelTime;
     private final int threads;
+    private final TravelTime carTravelTime;
     private final boolean isActivated;
     private final boolean isCalibrating;
     private final Provider<LeastCostPathCalculatorFactory> routerFactoryProvider;
@@ -45,7 +48,8 @@ public class TripsHandler {
                         TravelTime carTravelTime,
                         Provider<LeastCostPathCalculatorFactory> routerFactoryProvider,
                         int threads) {
-        this.network = network;
+        this.sourceNetwork = network;
+        this.network = new RoadNetwork(network);
         this.freespeedConfig = freespeedConfig;
         this.routerFactoryProvider = routerFactoryProvider;
         this.categorizer = categorizer;
@@ -76,29 +80,59 @@ public class TripsHandler {
     }
 
     public Map<FreespeedCalibrationKey, FreespeedFactorManager.GroupStats> routeTrips(){
-        return routeTripsAndCollectGroupStats();
+        long start = System.nanoTime();
+        try {
+            return routeTripsAndCollectGroupStats();
+        } finally {
+            logger.info("Freespeed observed-trip routing total: trips={}, seconds={}",
+                    observedTrips.size(), (System.nanoTime() - start) / 1e9);
+        }
     }
 
     private Map<FreespeedCalibrationKey, FreespeedFactorManager.GroupStats> routeTripsAndCollectGroupStats() {
         logger.info("Start routing trips and collecting group stats for freespeed calibration");
-        logger.info("Using car TravelTime implementation for calibration routing: {}", carTravelTime.getClass().getName());
-        int workerCount = Math.max(1, Math.min(threads*2, observedTrips.size()));
-        ExecutorService executor = Executors.newFixedThreadPool(workerCount);
-        List<Future<RoutingChunkResult>> futures = new ArrayList<>();
-        int chunkSize = Math.max(1, (observedTrips.size() + workerCount - 1) / workerCount);
-
-        for (int start = 0; start < observedTrips.size(); start += chunkSize) {
-            int end = Math.min(observedTrips.size(), start + chunkSize);
-            final int chunkStart = start;
-            final int chunkEnd = end;
-            futures.add(executor.submit(() -> routeTripsChunk(chunkStart, chunkEnd)));
+        if (observedTrips.isEmpty()) return Map.of();
+        // Filtering copies links. Keep fallback times and ALT minimum costs in
+        // sync with factors applied to the simulation network in earlier passes.
+        // This happens before workers start; topology/restrictions remain fixed.
+        long refreshStart = System.nanoTime();
+        for (Link link : network.getLinks().values()) {
+            link.setFreespeed(sourceNetwork.getLinks().get(link.getId()).getFreespeed());
         }
+        logger.info("Calibration copied-speed refresh took {} seconds", (System.nanoTime() - refreshStart) / 1e9);
+        logger.info("Using car TravelTime implementation for calibration routing: {}", carTravelTime.getClass().getName());
+        int workerCount = Math.max(1, Math.min(threads, observedTrips.size()));
+        long preparationStart = System.nanoTime();
+        // Resolve the injected factory once: RunSimulation's optimized-router override
+        // is inherited here. Shared graph/times, private search state per worker.
+        LeastCostPathCalculatorFactory configured = routerFactoryProvider.get();
+        // Factors (and hence ALT lower bounds) change after each calibration pass.
+        // Do not accumulate obsolete landmark sets in the simulation singleton.
+        LeastCostPathCalculatorFactory factory = configured instanceof MemoryEfficientSpeedyALTFactory
+                ? new MemoryEfficientSpeedyALTFactory() : configured;
+        logger.info("Calibration router: {}; workers={}", factory.getClass().getName(), workerCount);
+        var costs = new OnlyTimeDependentTravelDisutility(carTravelTime);
+        var routers = new ArrayList<LeastCostPathCalculator>(workerCount);
+        // make sure the quadtree is built before parallel routing starts
+        if (!network.getNodes().isEmpty()) NetworkUtils.getNearestNode(network,
+                network.getNodes().values().iterator().next().getCoord());
+        for (int i = 0; i < workerCount; i++) routers.add(factory.createPathCalculator(network, costs, carTravelTime));
+        logger.info("Calibration routing preparation took {} seconds", (System.nanoTime() - preparationStart) / 1e9);
+        long routingStart = System.nanoTime();
+        // Claim one input trip at a time; faster workers automatically process more trips.
+        var nextTrip = new java.util.concurrent.atomic.AtomicInteger();
+        List<Future<RoutingChunkResult>> futures = new ArrayList<>();
 
         Map<FreespeedCalibrationKey, FreespeedFactorManager.GroupStats> groupStats = new HashMap<>();
         int routedTrips = 0;
         int acceptedTrips = 0;
 
-        try {
+        try (ExecutorService executor = Executors.newFixedThreadPool(workerCount)) {
+            for (int i = 0; i < workerCount; i++) {
+                var router = routers.get(i);
+                int worker = i;
+                futures.add(executor.submit(() -> routeTripsChunk(router, nextTrip, worker)));
+            }
             for (Future<RoutingChunkResult> future : futures) {
                 RoutingChunkResult chunkResult = future.get();
                 mergeGroupStats(groupStats, chunkResult.groupStats);
@@ -110,28 +144,27 @@ public class TripsHandler {
             throw new RuntimeException("Interrupted while routing observed trips for freespeed calibration", e);
         } catch (ExecutionException e) {
             throw new RuntimeException("Failed to route observed trips for freespeed calibration", e);
-        } finally {
-            executor.shutdown();
         }
 
         logger.info("\t Routed {} observed trips for freespeed calibration", routedTrips);
         logger.info("\t Accepted {} observed trips for freespeed calibration after applying distance-based filter", acceptedTrips);
+        logger.info("Calibration routing and statistics merge took {} seconds", (System.nanoTime() - routingStart) / 1e9);
         return groupStats;
     }
 
-    private RoutingChunkResult routeTripsChunk(int startIndex, int endIndex) {
-        LeastCostPathCalculatorFactory factory = routerFactoryProvider.get();
-        LeastCostPathCalculator router = factory.createPathCalculator(network,
-                new OnlyTimeDependentTravelDisutility(carTravelTime),
-                carTravelTime);
-
-
+    private RoutingChunkResult routeTripsChunk(LeastCostPathCalculator router,
+            java.util.concurrent.atomic.AtomicInteger nextTrip, int worker) {
+        long start = System.nanoTime();
+        int assignedTrips = 0;
+        double assignedDistance = 0;
         Map<FreespeedCalibrationKey, FreespeedFactorManager.GroupStats> localStats = new HashMap<>();
         int routedTrips = 0;
         int acceptedTrips = 0;
 
-        for (int i = startIndex; i < endIndex; i++) {
-            ObservedTripsTravelTimesCsvHandler.ObservedSpeedTrip trip = observedTrips.get(i);
+        for (int i; !Thread.currentThread().isInterrupted() && (i = nextTrip.getAndIncrement()) < observedTrips.size();) {
+            var trip = observedTrips.get(i);
+            assignedTrips++;
+            assignedDistance += trip.traveledDistanceMeters;
             if (trip.travelTimeSeconds <= 0.0) {
                 continue;
             }
@@ -184,6 +217,9 @@ public class TripsHandler {
             acceptedTrips++;
         }
 
+        logger.info("Calibration worker {}: trips={}, targetDistanceKm={}, routed={}, accepted={}, seconds={}",
+                worker, assignedTrips, assignedDistance / 1000,
+                routedTrips, acceptedTrips, (System.nanoTime() - start) / 1e9);
         return new RoutingChunkResult(localStats, routedTrips, acceptedTrips);
     }
 

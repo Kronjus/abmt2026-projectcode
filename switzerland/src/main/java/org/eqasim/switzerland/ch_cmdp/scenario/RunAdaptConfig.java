@@ -5,6 +5,7 @@ import org.eqasim.core.components.network_calibration.NetworkCalibrationConfigGr
 import org.eqasim.core.simulation.mode_choice.EqasimModeChoiceModule;
 import org.eqasim.switzerland.ch_cmdp.SwitzerlandConfigurator;
 import org.eqasim.switzerland.ch_cmdp.mode_choice.SwissModeChoiceModule;
+import org.eqasim.switzerland.ch_cmdp.mode_choice.constraints.AirportConstraint;
 import org.eqasim.switzerland.ch_cmdp.mode_choice.constraints.RemoteWalkConstraint;
 import org.matsim.api.core.v01.TransportMode;
 import org.matsim.contribs.discrete_mode_choice.modules.config.DiscreteModeChoiceConfigGroup;
@@ -12,6 +13,8 @@ import org.matsim.contribs.discrete_mode_choice.modules.config.MultinomialLogitS
 import org.matsim.core.config.CommandLine;
 import org.matsim.core.config.CommandLine.ConfigurationException;
 import org.matsim.core.config.Config;
+import org.matsim.core.config.ConfigUtils;
+import org.eqasim.switzerland.ch_cmdp.walk.WalkConfigGroup;
 import org.matsim.core.config.groups.*;
 import org.matsim.core.config.groups.QSimConfigGroup.VehiclesSource;
 import org.matsim.core.config.groups.ReplanningConfigGroup.StrategySettings;
@@ -26,7 +29,7 @@ import java.util.*;
 
 public class RunAdaptConfig {
 
-	private static double storageCapExponent = 0.75;
+	private static double storageCapExponent = 1.0; // This is the old value: 0.75. It is no longer accepted in MATSim 2026
 
 	static public void main(String[] args) throws ConfigurationException {
 		CommandLine cmd = new CommandLine.Builder(args).allowAnyOption(true).build();
@@ -97,8 +100,9 @@ public class RunAdaptConfig {
 			qsimConfigGroup.setStorageCapFactor(Math.pow(SwissConfigAdapter.downsamplingRate, RunAdaptConfig.storageCapExponent));
 		}
 
-		// Primary_secondary activities
-		List<String> NEW_ACTIVITY_TYPES  = Arrays.asList("home_secondary", "work_secondary", "education_secondary", "border");
+		// Register additional activity types without activity-duration scoring, as in the base config.
+		List<String> NEW_ACTIVITY_TYPES  = Arrays.asList("home_secondary", "work_secondary", "education_secondary", "border",
+				AirportConstraint.AIRPORT_ACTIVITY);
 		ScoringConfigGroup scoringConfig0 = config.scoring();
 
 		for (String activityType : NEW_ACTIVITY_TYPES) {
@@ -223,7 +227,8 @@ public class RunAdaptConfig {
 		dmcConfig.setTripConstraints(Arrays.asList("OutsideConstraint", "TransitWalk",
 									SwissModeChoiceModule.LOOP_CONSTRAINT_NAME,
 									SwissModeChoiceModule.REMOTE_WALK_CONSTRAINT_NAME,
-									SwissModeChoiceModule.BORDER_CONSTRAINT_NAME));
+									SwissModeChoiceModule.BORDER_CONSTRAINT_NAME,
+									SwissModeChoiceModule.AIRPORT_CONSTRAINT_NAME));
 
 		// adapting Scoring config with custom activities
 		if (SwissConfigAdapter.hasCustomActivities) {
@@ -250,7 +255,7 @@ public class RunAdaptConfig {
 		transitRouterParams.setAdditionalTransferTime(5.0);
 		transitRouterParams.setDirectWalkFactor(3.0);
 		transitRouterParams.setMaxBeelineWalkConnectionDistance(300.0);
-		transitRouterParams.setSearchRadius(400.0);
+		transitRouterParams.setSearchRadius(1000.0);
 		transitRouterParams.setExtensionRadius(400.0);
 
 		// Network calibration
@@ -260,6 +265,14 @@ public class RunAdaptConfig {
 		if (!SwissConfigAdapter.speedsFile.isEmpty()){ netCalibConfig.getFreeSpeedCalibrationConfigGroup().setObservedTripsFile(SwissConfigAdapter.speedsFile);}
 		if (!SwissConfigAdapter.speedsSpecialRegionPath.isEmpty()){ netCalibConfig.getFreeSpeedCalibrationConfigGroup().setSpecialRegionPath(SwissConfigAdapter.speedsSpecialRegionPath);}
 
+		// walking module
+		WalkConfigGroup walking = ConfigUtils.addOrGetModule(config, WalkConfigGroup.class);
+		walking.setModel(SwissConfigAdapter.walkModel);
+		walking.setK(SwissConfigAdapter.walkK);
+		walking.setV0MetersPerSecond(SwissConfigAdapter.walkV0);
+		walking.setUphillPenalty(SwissConfigAdapter.walkUphillPenalty);
+		walking.setFlatGrade(SwissConfigAdapter.walkFlatGrade);
+		walking.setDetourFactor(SwissConfigAdapter.walkDetourFactor);
 	}
 
 }

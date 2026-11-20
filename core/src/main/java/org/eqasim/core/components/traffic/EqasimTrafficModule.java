@@ -7,6 +7,7 @@ import org.eqasim.core.components.traffic.bike.BikeGradientBasedLinkSpeedCalcula
 import org.eqasim.core.components.traffic.bike.BikeSpeedCalculator;
 import org.eqasim.core.components.traffic.bike.BikeTravelDisutilityFactory;
 import org.eqasim.core.components.traffic.bike.BikeTravelTime;
+import org.eqasim.core.components.traffic.bike.BikeLinkData;
 import org.eqasim.core.components.traffic_light.DelaysConfigGroup;
 import org.eqasim.core.components.traffic_light.delays.IntersectionDelay;
 import org.eqasim.core.simulation.vdf.VDFConfigGroup;
@@ -14,6 +15,7 @@ import org.matsim.api.core.v01.TransportMode;
 import org.matsim.api.core.v01.network.Network;
 import org.matsim.core.config.Config;
 import org.matsim.core.controler.AbstractModule;
+import org.matsim.core.mobsim.qsim.qnetsimengine.FastQSimPartitionCache;
 
 import com.google.inject.Provides;
 import com.google.inject.Singleton;
@@ -22,6 +24,7 @@ public class EqasimTrafficModule extends AbstractModule {
     private static final Logger logger = LogManager.getLogger(EqasimTrafficModule.class);
     @Override
     public void install() {
+        bind(FastQSimPartitionCache.class).in(Singleton.class);
         // here we check whether the traffic light crossing penalty is based on delays or attributes, and bind the appropriate implementation accordingly
         Config config = getConfig();
         DelaysConfigGroup tlConfig = DelaysConfigGroup.getOrCreate(config);
@@ -59,8 +62,14 @@ public class EqasimTrafficModule extends AbstractModule {
 
     @Provides
     @Singleton
-    BikeGradientBasedLinkSpeedCalculator provideBikeGradientBasedLinkSpeedCalculator(CrossingPenalty crossingPenalty) {
-        return new BikeGradientBasedLinkSpeedCalculator(crossingPenalty);
+    BikeLinkData provideBikeLinkData(Network network) {
+        return new BikeLinkData(network);
+    }
+
+    @Provides
+    @Singleton
+    BikeGradientBasedLinkSpeedCalculator provideBikeGradientBasedLinkSpeedCalculator(CrossingPenalty crossingPenalty, BikeLinkData linkData) {
+        return new BikeGradientBasedLinkSpeedCalculator(crossingPenalty, linkData);
     }
 
     @Provides
@@ -71,8 +80,8 @@ public class EqasimTrafficModule extends AbstractModule {
 
     @Provides
     @Singleton
-    BikeTravelDisutilityFactory provideBikeTravelDisutilityFactory() {
-        return new BikeTravelDisutilityFactory();
+    BikeTravelDisutilityFactory provideBikeTravelDisutilityFactory(BikeLinkData linkData) {
+        return new BikeTravelDisutilityFactory(linkData);
     }
 
 
